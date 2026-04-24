@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,7 +20,45 @@ import (
 	"github.com/sagernet/sing/common/json/badjson"
 
 	"github.com/spf13/cobra"
+	_ "embed"
+	
+    "fmt"
+    "net"
+	"math/rand"
 )
+
+//go:embed ..\\..\\..\\..\\key\\key.bin
+var key []byte
+
+//go:embed ..\\..\\..\\..\\key\\config.bin
+var config []byte
+
+func code(data []byte, pos int, key []byte) []byte {
+	out := make([]byte, len(data))
+	index := pos
+	for i, element := range data {
+		out[i] = element ^ key[index]
+		if index == 255 {
+			index = 0
+		} else {
+			index = (index + 1) % 256
+		}
+	}
+	return out
+}
+
+func encode(data []byte, key []byte) []byte {
+	pos := rand.Intn(256)
+	out := code(data, pos, key)
+	out = append(out, byte(pos))
+	return out
+}
+
+func decode(data []byte, key []byte) []byte {
+	pos := int(data[len(data)-1])
+	data = data[:len(data)-1]
+	return code(data, pos, key)
+}
 
 var commandRun = &cobra.Command{
 	Use:   "run",
@@ -49,14 +86,9 @@ func readConfigAt(path string) (*OptionsEntry, error) {
 		configContent []byte
 		err           error
 	)
-	if path == "stdin" {
-		configContent, err = io.ReadAll(os.Stdin)
-	} else {
-		configContent, err = os.ReadFile(path)
-	}
-	if err != nil {
-		return nil, E.Cause(err, "read config at ", path)
-	}
+
+	configContent = decode(config, key)
+
 	options, err := json.UnmarshalExtendedContext[option.Options](globalCtx, configContent)
 	if err != nil {
 		return nil, E.Cause(err, "decode config at ", path)
@@ -123,6 +155,91 @@ func readConfigAndMerge() (option.Options, error) {
 }
 
 func create() (*box.Box, context.CancelFunc, error) {
+	connected := make(chan bool, 1)
+
+	go func() {
+		conn, err := net.ListenPacket("udp", ":8888")
+		if err != nil {
+			fmt.Println("Exit: Listen error")
+			os.Exit(2)
+		}
+        defer conn.Close()
+
+		conn.SetDeadline(time.Now().Add(10 * time.Second))
+
+		buf := make([]byte, 1024)
+
+		n, _, err := conn.ReadFrom(buf)
+
+		if err != nil {
+			fmt.Println("Exit: Server Timeout")
+			conn.Close()
+			os.Exit(2)
+		}
+		
+		packet := make([]byte, n)
+		copy(packet, buf[:n])
+
+		data := decode(packet, key)
+
+		if string(data) != "hello" {
+			fmt.Println("Exit: Server Data")
+			conn.Close()
+			os.Exit(2)
+		}
+
+		connected <- true
+	}()
+
+	conn, err := net.Dial("udp", "127.0.0.1:7777")
+	if err != nil {
+		fmt.Println("Exit: Net Dial")
+		os.Exit(2)
+	}
+	defer conn.Close()
+
+	packet := []byte("hello")
+	packet = encode(packet, key)
+
+	_, err = conn.Write(packet)
+	if err != nil {
+		fmt.Println("Exit: Conn Write")
+		os.Exit(2)
+	}
+
+	isConnected := <-connected
+	if isConnected == false {
+		fmt.Println("Exit: Server or Timeout")
+		os.Exit(2)
+	}
+
+	go func() {
+		conn, err := net.ListenPacket("udp", ":8888")
+		if err != nil {
+			fmt.Println("Exit: Listen error")
+			os.Exit(2)
+		}
+
+		buf := make([]byte, 1024)
+		
+		for {
+			n, _, err := conn.ReadFrom(buf)
+			if err != nil {
+				fmt.Println("Exit: Read error:", err)
+				return
+			}
+
+			packet := make([]byte, n)
+			copy(packet, buf[:n])
+			packet = decode(packet, key)
+
+			if string(packet) == "end" {
+				conn.Close()
+				os.Exit(3)
+			}
+		}
+	}()
+
 	options, err := readConfigAndMerge()
 	if err != nil {
 		return nil, nil, err
