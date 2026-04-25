@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	fmt.Println("Tapir-Box v0.3")
+	fmt.Println("Tapir-Box v0.5 (v1.14.0-alpha.18)")
 	
 	go func() {
         time.Sleep(200 * time.Second)
